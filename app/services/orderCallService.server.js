@@ -1,4 +1,5 @@
 ﻿import prisma from "../db.server.js";
+import { sendWhatsAppFallback } from "../utils/whatsappFallback.server.js";
 
 export const ORDER_STATUS = {
   PENDING: "PENDING",
@@ -14,6 +15,7 @@ export const CALL_STATUS = {
   COMPLETED: "COMPLETED",
   RETRY_SCHEDULED: "RETRY_SCHEDULED",
   FAILED: "FAILED",
+  WHATSAPP_SENT: "WHATSAPP_SENT",
 };
 
 export const CALL_INTENT = {
@@ -26,6 +28,7 @@ export const CALL_INTENT = {
 };
 
 export const MAX_RETRIES = 100;
+export const MAX_NO_RESPONSE_RETRIES = 3; // After 3 NO_RESPONSE retries → WhatsApp fallback
 export const RETRY_DELAY_BUSY_MS = 5 * 60 * 1000;
 export const RETRY_DELAY_RECALL_MS = 5 * 60 * 1000;
 export const RETRY_DELAY_NO_RESPONSE_MS = 5 * 60 * 1000;
@@ -146,7 +149,7 @@ export async function getLatestCallLogByOrderId(orderId) {
 export async function getLatestOpenCallLogByPhone(phoneNumber) {
   return prisma.callLog.findFirst({
     where: {
-      status: { in: [CALL_STATUS.QUEUED, CALL_STATUS.IN_PROGRESS, CALL_STATUS.RETRY_SCHEDULED, CALL_STATUS.FAILED] },
+      status: { in: [CALL_STATUS.QUEUED, CALL_STATUS.IN_PROGRESS, CALL_STATUS.RETRY_SCHEDULED, CALL_STATUS.FAILED, CALL_STATUS.WHATSAPP_SENT] },
       order: {
         phoneNumber,
         orderStatus: { in: [ORDER_STATUS.PENDING, ORDER_STATUS.PENDING_MANUAL_REVIEW] },
@@ -179,6 +182,23 @@ export async function handleCallResult(orderId, intent, opts = {}) {
     }
 
     const vId = opts.vapiCallId || callLog.vapiCallId;
+
+    // Skip processing if WhatsApp was already sent and this is not a WhatsApp reply
+    // WhatsApp replies come in via the whatsapp-webhook route with a failureReason marker
+    if (callLog.status === CALL_STATUS.WHATSAPP_SENT && !opts.fromWhatsApp) {
+      logStatus("IGNORED_WHATSAPP_PENDING", {
+        orderId,
+        callLogId: callLog.id,
+        intent: normalizedIntent,
+        status: callLog.status,
+      });
+      return {
+        ignored: true,
+        orderStatus: callLog.order?.orderStatus,
+        callStatus: callLog.status,
+        retryCount: callLog.retryCount,
+      };
+    }
 
     if (callLog.status === CALL_STATUS.COMPLETED || callLog.status === CALL_STATUS.FAILED) {
       // Allow late definitive intents to correct terminal rows when webhook ordering is delayed.
@@ -323,6 +343,55 @@ export async function handleCallResult(orderId, intent, opts = {}) {
     }
 
     const nextRetryCount = callLog.retryCount + 1;
+
+    // ── WhatsApp fallback: after MAX_NO_RESPONSE_RETRIES failed attempts ──
+    // Triggers on ALL retry intents (NO_RESPONSE, RECALL_REQUEST, BUSY)
+    // because Vapi reports unanswered calls as recall_request/busy, not NO_RESPONSE
+    if (nextRetryCount >= MAX_NO_RESPONSE_RETRIES) {
+      const now = new Date();
+      const [order, call] = await Promise.all([
+        tx.order.update({
+          where: { id: orderId },
+          data: { orderStatus: ORDER_STATUS.PENDING },
+        }),
+        tx.callLog.update({
+          where: { id: callLog.id },
+          data: {
+            ...baseCallUpdate,
+            status: CALL_STATUS.WHATSAPP_SENT,
+            retryCount: nextRetryCount,
+            nextRetryAt: null,
+            whatsappSentAt: now,
+          },
+        }),
+      ]);
+
+      logStatus("WHATSAPP_FALLBACK_TRIGGERED", {
+        orderId,
+        callLogId: call.id,
+        intent: normalizedIntent,
+        orderStatus: order.orderStatus,
+        callStatus: call.status,
+        retryCount: call.retryCount,
+      });
+
+      // Send WhatsApp message outside the transaction (fire-and-forget with logging)
+      // We need the full callLog with order for the message builder
+      const fullCallLog = { ...call, order };
+      sendWhatsAppFallback(fullCallLog).catch((err) => {
+        console.error(
+          `[WhatsApp] Failed to send fallback for callLogId=${call.id}:`,
+          err.message,
+        );
+      });
+
+      return {
+        orderStatus: order.orderStatus,
+        callStatus: call.status,
+        retryCount: call.retryCount,
+        whatsappSent: true,
+      };
+    }
 
     if (nextRetryCount >= MAX_RETRIES) {
       const [order, call] = await Promise.all([

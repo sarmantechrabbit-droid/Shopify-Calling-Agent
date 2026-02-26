@@ -27,6 +27,7 @@ enum CallStatus {
   COMPLETED
   RETRY_SCHEDULED
   FAILED
+  WHATSAPP_SENT
 }
 
 model CustomerCall {
@@ -77,10 +78,12 @@ model CallLog {
   retryCount    Int       @default(0)
   nextRetryAt   DateTime?
   failureReason String?
-  lastIntent    String?
-  lockedAt      DateTime?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  lastIntent        String?
+  lockedAt          DateTime?
+  whatsappSentAt    DateTime?
+  whatsappRepliedAt DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   @@index([orderId])
   @@index([vapiCallId])
