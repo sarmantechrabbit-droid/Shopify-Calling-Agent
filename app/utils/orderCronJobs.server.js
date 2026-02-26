@@ -13,6 +13,7 @@ import {
   scanForIntent,
   ASSISTANT_INTENT_MAP
 } from "../services/vapiOrderService.server.js";
+import prisma from "../db.server.js";
 
 // eslint-disable-next-line no-undef
 const g = global;
@@ -35,37 +36,39 @@ export function startOrderCronJobs() {
       for (const callLog of stale) {
         if (!callLog.order) continue;
         
-        console.log(`[OrderCron] 🛰️ Checking Vapi for stale call ${callLog.vapiCallId}...`);
+        console.log(`[OrderCron] 🛰️ Checking stale call ${callLog.vapiCallId}...`);
         
-        // Fetch full data to check status and timing
-        const apiKey = process.env.VAPI_API_KEY;
-        const res = await fetch(`https://api.vapi.ai/call/${callLog.vapiCallId}`, {
-          headers: { "Authorization": `Bearer ${apiKey}` }
-        }).catch(() => null);
-
+        // Use getVapiCallIntent — it checks endedReason (no-answer, busy)
+        // AND scans structuredData/Outputs for confirm/cancel
         let intent = null;
-        let callData = null;
-        if (res?.ok) {
-          callData = await res.json();
-          const rawIntent = scanForIntent(callData);
-          if (rawIntent) {
-            intent = ASSISTANT_INTENT_MAP[rawIntent];
-          }
+        if (callLog.vapiCallId) {
+          intent = await getVapiCallIntent(callLog.vapiCallId);
         }
         
-        // If no intent yet, but call just ended, wait up to 60s for analysis to finish
-        if (!intent && callData?.status === 'ended') {
-          const endedAt = callData.endedAt ? new Date(callData.endedAt).getTime() : Date.now();
-          const now = Date.now();
-          if (now - endedAt < 60000) { 
-            console.log(`[OrderCron] Call ${callLog.vapiCallId} ended recently; waiting for analysis...`);
-            continue; 
+        // If intent is still null, it might be too early (Vapi still processing)
+        // Release the lock and let the next cycle try again
+        if (!intent) {
+          // Check how old this stale row is — if it's been stale for > 90s, force a retry
+          const staleSince = callLog.updatedAt ? new Date(callLog.updatedAt).getTime() : 0;
+          const staleAge = Date.now() - staleSince;
+          
+          if (staleAge < 90_000) {
+            // Less than 90s — release lock, try again next cycle
+            console.log(`[OrderCron] Call ${callLog.vapiCallId} stale for ${Math.round(staleAge/1000)}s, waiting...`);
+            await prisma.callLog.update({ 
+              where: { id: callLog.id }, 
+              data: { lockedAt: null } 
+            }).catch(() => {});
+            continue;
           }
+          
+          console.log(`[OrderCron] Call ${callLog.vapiCallId} stale for ${Math.round(staleAge/1000)}s — forcing retry`);
         }
         
-        const finalIntent = intent ? intent : CALL_INTENT.RECALL_REQUEST;
-        const reason = intent ? `Recovered from API: ${intent}` : "Stale recovery fallback to retry";
+        const finalIntent = intent || CALL_INTENT.RECALL_REQUEST;
+        const reason = intent ? `Cron recovered: ${intent}` : "No intent after timeout — retry";
 
+        console.log(`[OrderCron] ➡️ Applying intent=${finalIntent} to order=${callLog.order.id}`);
         await handleCallResult(callLog.order.id, finalIntent, {
           callLogId: callLog.id,
           failureReason: reason,
