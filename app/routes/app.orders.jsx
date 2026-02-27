@@ -1,8 +1,6 @@
 ﻿import { useEffect, useState } from "react";
 import { useFetcher, useLoaderData, useRevalidator } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
-import { authenticate } from "../shopify.server";
-
 const UI_MAX_RETRIES = 100;
 const UI_ORDER_STATUS = {
   PENDING: "PENDING",
@@ -20,14 +18,22 @@ const UI_CALL_STATUS = {
 };
 
 export const loader = async ({ request }) => {
+  const { authenticate } = await import("../shopify.server");
   await authenticate.admin(request);
-  const { getOrderStats, getRecentOrders } = await import("../services/orderCallService.server.js");
-  const [stats, orders] = await Promise.all([getOrderStats(), getRecentOrders(50)]);
+  const { getOrderStats, getRecentOrders } = await import(
+    "../services/orderCallService.server.js"
+  );
+  const [stats, orders] = await Promise.all([
+    getOrderStats(),
+    getRecentOrders(50),
+  ]);
   return { stats, orders };
 };
 
 export const action = async ({ request }) => {
+  const { authenticate } = await import("../shopify.server");
   await authenticate.admin(request);
+
 
   const {
     CALL_INTENT,

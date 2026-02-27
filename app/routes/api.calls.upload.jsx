@@ -1,43 +1,15 @@
-/**
- * POST /api/calls/upload
- *
- * Public API endpoint that accepts a JSON array of customers and bulk-inserts
- * them as pending call records.  The /api/calls/start endpoint (or the
- * dashboard "Start All Calls" button) is then used to fire the actual Vapi
- * calls.
- *
- * Request body (application/json):
- *   {
- *     "customers": [
- *       { "customerName": "Jane Doe", "phone": "+917041668245" },
- *       { "customerName": "John Smith", "phone": "+12125551234" }
- *     ]
- *   }
- *
- * Successful response:
- *   { "success": true, "created": 10, "skipped": 2, "errors": [...] }
- *
- * Security note:
- *   This endpoint is intentionally left without Shopify session auth so that
- *   external scripts / CRM integrations can push customers via API key or
- *   webhook.  For production, consider adding Bearer token validation using
- *   an API_SECRET env var checked here.
- */
+// app/routes/api.calls.upload.jsx
 
-import { createCallsBatch } from "../services/callService.server.js";
-import {
-  validatePhone,
-  checkAllowedPrefix,
-} from "../utils/validation.server.js";
-
-// ─── Action (POST) ────────────────────────────────────────────────────────────
-
-export async function action({ request }) {
+export const action = async ({ request }) => {
   if (request.method !== "POST") {
     return Response.json({ error: "Method not allowed" }, { status: 405 });
   }
 
-  // ── Parse body ────────────────────────────────────────────────────────────
+  const { createCallsBatch } = await import("../services/callService.server.js");
+  const { validatePhone, checkAllowedPrefix } = await import(
+    "../utils/validation.server.js"
+  );
+
   let body;
   try {
     body = await request.json();
@@ -67,7 +39,6 @@ export async function action({ request }) {
     );
   }
 
-  // ── Validate each row ─────────────────────────────────────────────────────
   const valid = [];
   const errors = [];
 
@@ -76,21 +47,23 @@ export async function action({ request }) {
     const rawName = row.customerName ?? row.name ?? "";
     const rawPhone = row.phone ?? row.phoneNumber ?? "";
 
-    // Validate name
     const customerName = String(rawName).trim();
     if (!customerName) {
       errors.push({ index: i, error: "Missing customerName" });
       continue;
     }
 
-    // Validate phone (E.164)
     const phoneResult = validatePhone(rawPhone);
     if (phoneResult.error) {
-      errors.push({ index: i, customerName, raw: rawPhone, error: phoneResult.error });
+      errors.push({
+        index: i,
+        customerName,
+        raw: rawPhone,
+        error: phoneResult.error,
+      });
       continue;
     }
 
-    // Validate allowed prefix
     const prefixError = checkAllowedPrefix(phoneResult.phone);
     if (prefixError) {
       errors.push({
@@ -115,14 +88,12 @@ export async function action({ request }) {
     );
   }
 
-  // ── Batch insert ──────────────────────────────────────────────────────────
   try {
     const result = await createCallsBatch(valid);
     return Response.json({
       success: true,
       created: result.count,
       skipped: errors.length,
-      // Only include errors array when there were validation failures
       ...(errors.length > 0 ? { errors } : {}),
     });
   } catch (err) {
@@ -132,13 +103,5 @@ export async function action({ request }) {
       { status: 500 },
     );
   }
-}
+};
 
-// ─── Loader (GET) — health-check ─────────────────────────────────────────────
-
-export async function loader() {
-  return Response.json({
-    status: "Calls upload endpoint active",
-    usage: "POST /api/calls/upload with { customers: [{ customerName, phone }] }",
-  });
-}

@@ -11,40 +11,38 @@
  * UI auto-refreshes every 10 seconds via useRevalidator.
  */
 
-import { useEffect, useState, useCallback } from "react";
-import { useFetcher, useLoaderData, useRevalidator } from "react-router";
-import { useAppBridge } from "@shopify/app-bridge-react";
-import { boundary } from "@shopify/shopify-app-react-router/server";
-import { authenticate } from "../shopify.server";
-import {
-  createCall,
-  getCallById,
-  getRecentCalls,
-  getStats,
-  setCallCalling,
-  setCallRetrying,
-  updateCallWithVapiId,
-  markCallFailed,
-} from "../services/callService.server.js";
-import {
-  initiateVapiCall,
-  isPermanentVapiError,
-} from "../services/vapiService.server.js";
-import {
-  validatePhone,
-  checkAllowedPrefix,
-} from "../utils/validation.server.js";
-
-// ─── Server ───────────────────────────────────────────────────────────────────
+// app/routes/app._index.jsx
 
 export const loader = async ({ request }) => {
+  const { authenticate } = await import("../shopify.server");
+  const { getRecentCalls, getStats } = await import(
+    "../services/callService.server.js"
+  );
+
   await authenticate.admin(request);
   const [stats, calls] = await Promise.all([getStats(), getRecentCalls(50)]);
   return { stats, calls };
 };
 
 export const action = async ({ request }) => {
+  const { authenticate } = await import("../shopify.server");
+  const {
+    createCall,
+    getCallById,
+    setCallCalling,
+    setCallRetrying,
+    updateCallWithVapiId,
+    markCallFailed,
+  } = await import("../services/callService.server.js");
+  const { initiateVapiCall, isPermanentVapiError } = await import(
+    "../services/vapiService.server.js"
+  );
+  const { validatePhone, checkAllowedPrefix } = await import(
+    "../utils/validation.server.js"
+  );
+
   await authenticate.admin(request);
+
 
   const formData = await request.formData();
   const intent = String(formData.get("intent") ?? "create");
