@@ -284,6 +284,7 @@ export default function OrdersPage() {
   const createFetcher = useFetcher();
   const [showCreateModal, setShowCreateModal] = useState(false);
 
+ // ── Auto-refresh every 10 s ─────────────────────────────────────────────
   useEffect(() => {
     const id = setInterval(revalidate, 10_000);
     return () => clearInterval(id);

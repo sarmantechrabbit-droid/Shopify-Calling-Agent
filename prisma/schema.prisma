@@ -82,6 +82,8 @@ model CallLog {
   lockedAt          DateTime?
   whatsappSentAt    DateTime?
   whatsappRepliedAt DateTime?
+  whatsappReplied   Boolean   @default(false)
+  secondReminderSent Boolean  @default(false)
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 

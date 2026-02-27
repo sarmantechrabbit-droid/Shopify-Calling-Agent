@@ -362,6 +362,8 @@ export async function handleCallResult(orderId, intent, opts = {}) {
             retryCount: nextRetryCount,
             nextRetryAt: null,
             whatsappSentAt: now,
+            whatsappReplied: false,
+            secondReminderSent: false,
           },
         }),
       ]);

@@ -6,12 +6,14 @@ import { isbot } from "isbot";
 import { addDocumentResponseHeaders } from "./shopify.server";
 import { startCronJobs } from "./utils/cronJobs.server.js";
 import { startOrderCronJobs } from "./utils/orderCronJobs.server.js";
+import { startReminderService } from "./services/reminderService.server.js";
 
 // Boot the auto-retry schedulers when the server module is first loaded.
 // Both use global singleton guards to prevent duplicate schedulers under
 // Vite HMR or if this module is re-evaluated.
 startCronJobs();
 startOrderCronJobs();
+startReminderService();
 
 export const streamTimeout = 5000;
 

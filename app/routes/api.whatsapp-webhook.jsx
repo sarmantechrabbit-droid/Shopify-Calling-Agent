@@ -173,11 +173,12 @@ export async function action({ request }) {
       fromWhatsApp: true,
     });
 
-    // Update whatsappRepliedAt timestamp
+    // Update whatsappRepliedAt timestamp and mark as replied
     await prisma.callLog.update({
       where: { id: callLog.id },
       data: {
         whatsappRepliedAt: new Date(),
+        whatsappReplied: true,
       },
     });
 
