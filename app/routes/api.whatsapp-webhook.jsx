@@ -1,57 +1,46 @@
 // app/routes/api.whatsapp-webhook.jsx
+import prisma from "../db.server.js";
+import {
+  CALL_INTENT,
+  ORDER_STATUS,
+  handleCallResult,
+  getLatestOpenCallLogByPhone,
+} from "../services/orderCallService.server.js";
+
+/**
+ * Normalize the incoming phone number from Twilio's "whatsapp:+91XXXXXXXXXX" format
+ * to a plain E.164 number "+91XXXXXXXXXX".
+ */
+function normalizeWhatsAppPhone(from) {
+  if (!from) return null;
+  return String(from).replace(/^whatsapp:/i, "").trim();
+}
+
+/**
+ * Map the customer's WhatsApp reply to a CALL_INTENT.
+ */
+function mapReplyToIntent(body) {
+  if (!body || typeof body !== "string") return null;
+  const text = body.trim().toLowerCase();
+
+  if (text === "1") return CALL_INTENT.CONFIRM;
+  if (text === "2") return CALL_INTENT.CANCEL;
+  if (text === "3") return CALL_INTENT.WRONG_NUMBER;
+
+  if (text === "yes" || text === "confirm" || text === "haan" || text === "ha") {
+    return CALL_INTENT.CONFIRM;
+  }
+  if (text === "no" || text === "cancel" || text === "nahi" || text === "nako") {
+    return CALL_INTENT.CANCEL;
+  }
+  return null;
+}
+
+function logWA(event, payload) {
+  console.log(`[WhatsAppWebhook] ${event} ${JSON.stringify(payload)}`);
+}
 
 export const action = async ({ request }) => {
-  const { default: prisma } = await import("../db.server.js");
-  const {
-    CALL_INTENT,
-    ORDER_STATUS,
-    handleCallResult,
-    getLatestOpenCallLogByPhone,
-  } = await import("../services/orderCallService.server.js");
-
-  /**
-   * Normalize the incoming phone number from Twilio's "whatsapp:+91XXXXXXXXXX" format
-   * to a plain E.164 number "+91XXXXXXXXXX".
-   */
-  function normalizeWhatsAppPhone(from) {
-    if (!from) return null;
-    return String(from).replace(/^whatsapp:/i, "").trim();
-  }
-
-  /**
-   * Map the customer's WhatsApp reply to a CALL_INTENT.
-   */
-  function mapReplyToIntent(body) {
-    if (!body || typeof body !== "string") return null;
-    const text = body.trim().toLowerCase();
-
-    if (text === "1") return CALL_INTENT.CONFIRM;
-    if (text === "2") return CALL_INTENT.CANCEL;
-    if (text === "3") return CALL_INTENT.WRONG_NUMBER;
-
-    if (
-      text === "yes" ||
-      text === "confirm" ||
-      text === "haan" ||
-      text === "ha"
-    ) {
-      return CALL_INTENT.CONFIRM;
-    }
-    if (
-      text === "no" ||
-      text === "cancel" ||
-      text === "nahi" ||
-      text === "nako"
-    ) {
-      return CALL_INTENT.CANCEL;
-    }
-    return null;
-  }
-
-  function logWA(event, payload) {
-    console.log(`[WhatsAppWebhook] ${event} ${JSON.stringify(payload)}`);
-  }
-
   const logId = Math.random().toString(36).substring(7);
   console.log(`\n[WhatsAppWebhook][${logId}] 📥 INCOMING WHATSAPP MESSAGE`);
 
@@ -203,4 +192,5 @@ export const action = async ({ request }) => {
     );
   }
 };
+
 

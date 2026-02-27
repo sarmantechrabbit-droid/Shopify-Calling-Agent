@@ -1,33 +1,20 @@
 ﻿import prisma from "../db.server.js";
 import { sendWhatsAppFallback } from "../utils/whatsappFallback.server.js";
+import {
+  ORDER_STATUS,
+  ORDER_CALL_STATUS,
+  CALL_INTENT,
+  ORDER_MAX_RETRIES,
+} from "../constants.js";
 
-export const ORDER_STATUS = {
-  PENDING: "PENDING",
-  CONFIRMED: "CONFIRMED",
-  CANCELLED: "CANCELLED",
-  PENDING_MANUAL_REVIEW: "PENDING_MANUAL_REVIEW",
-  INVALID: "INVALID",
-};
+const CALL_STATUS = ORDER_CALL_STATUS;
+const MAX_RETRIES = ORDER_MAX_RETRIES;
 
-export const CALL_STATUS = {
-  QUEUED: "QUEUED",
-  IN_PROGRESS: "IN_PROGRESS",
-  COMPLETED: "COMPLETED",
-  RETRY_SCHEDULED: "RETRY_SCHEDULED",
-  FAILED: "FAILED",
-  WHATSAPP_SENT: "WHATSAPP_SENT",
-};
+export { ORDER_STATUS, CALL_INTENT, CALL_STATUS, MAX_RETRIES };
 
-export const CALL_INTENT = {
-  CONFIRM: "CONFIRM",
-  CANCEL: "CANCEL",
-  BUSY: "BUSY",
-  RECALL_REQUEST: "RECALL_REQUEST",
-  NO_RESPONSE: "NO_RESPONSE",
-  WRONG_NUMBER: "WRONG_NUMBER",
-};
 
-export const MAX_RETRIES = 100;
+
+
 export const MAX_NO_RESPONSE_RETRIES = 3; // After 3 NO_RESPONSE retries → WhatsApp fallback
 export const RETRY_DELAY_BUSY_MS = 5 * 60 * 1000;
 export const RETRY_DELAY_RECALL_MS = 5 * 60 * 1000;

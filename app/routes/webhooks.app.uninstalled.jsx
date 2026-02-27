@@ -1,9 +1,8 @@
 // app/routes/webhooks.app.uninstalled.jsx
+import { authenticate } from "../shopify.server";
+import db from "../db.server";
 
 export const action = async ({ request }) => {
-  const { authenticate } = await import("../shopify.server");
-  const { default: db } = await import("../db.server");
-
   const { shop, session, topic } = await authenticate.webhook(request);
 
   console.log(`Received ${topic} webhook for ${shop}`);
@@ -14,4 +13,5 @@ export const action = async ({ request }) => {
 
   return new Response();
 };
+
 

@@ -1,28 +1,35 @@
 ﻿import { useEffect, useState } from "react";
 import { useFetcher, useLoaderData, useRevalidator } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
-const UI_MAX_RETRIES = 100;
-const UI_ORDER_STATUS = {
-  PENDING: "PENDING",
-  CONFIRMED: "CONFIRMED",
-  CANCELLED: "CANCELLED",
-  PENDING_MANUAL_REVIEW: "PENDING_MANUAL_REVIEW",
-  INVALID: "INVALID",
-};
-const UI_CALL_STATUS = {
-  QUEUED: "QUEUED",
-  IN_PROGRESS: "IN_PROGRESS",
-  COMPLETED: "COMPLETED",
-  RETRY_SCHEDULED: "RETRY_SCHEDULED",
-  FAILED: "FAILED",
-};
+import { authenticate } from "../shopify.server";
+import {
+  ORDER_STATUS,
+  ORDER_CALL_STATUS,
+  CALL_INTENT,
+  ORDER_MAX_RETRIES,
+} from "../constants.js";
+import {
+  getOrderStats,
+  getRecentOrders,
+  handleCallResult,
+  createOrderWithCallLog,
+  getCallLogById,
+  setCallLogInProgress,
+  updateCallLogVapiId,
+} from "../services/orderCallService.server.js";
+
+import {
+  triggerOrderConfirmationCall,
+  isPermanentOrderVapiError,
+} from "../services/vapiOrderService.server.js";
+
+const UI_MAX_RETRIES = ORDER_MAX_RETRIES;
+const UI_ORDER_STATUS = ORDER_STATUS;
+const UI_CALL_STATUS = ORDER_CALL_STATUS;
+
 
 export const loader = async ({ request }) => {
-  const { authenticate } = await import("../shopify.server");
   await authenticate.admin(request);
-  const { getOrderStats, getRecentOrders } = await import(
-    "../services/orderCallService.server.js"
-  );
   const [stats, orders] = await Promise.all([
     getOrderStats(),
     getRecentOrders(50),
@@ -31,26 +38,12 @@ export const loader = async ({ request }) => {
 };
 
 export const action = async ({ request }) => {
-  const { authenticate } = await import("../shopify.server");
   await authenticate.admin(request);
 
 
-  const {
-    CALL_INTENT,
-    CALL_STATUS,
-    MAX_RETRIES,
-    createOrderWithCallLog,
-    getCallLogById,
-    handleCallResult,
-    setCallLogInProgress,
-    updateCallLogVapiId,
-  } = await import("../services/orderCallService.server.js");
-  const { triggerOrderConfirmationCall, isPermanentOrderVapiError } = await import(
-    "../services/vapiOrderService.server.js",
-  );
-
   const formData = await request.formData();
   const intent = String(formData.get("intent") ?? "").trim();
+
 
   if (intent === "create-order") {
     const customerName = String(formData.get("customerName") ?? "").trim();
@@ -142,77 +135,120 @@ export const action = async ({ request }) => {
     }
   }
 
-  if (intent !== "recall-one") {
-    return Response.json({ error: "Unknown intent." }, { status: 400 });
-  }
+  if (intent === "recall-one") {
+    const callLogId = String(formData.get("callLogId") ?? "").trim();
+    if (!callLogId)
+      return Response.json({ error: "Missing callLogId." }, { status: 400 });
 
-  const callLogId = String(formData.get("callLogId") ?? "").trim();
-  if (!callLogId) return Response.json({ error: "Missing callLogId." }, { status: 400 });
+    const callLog = await getCallLogById(callLogId);
+    if (!callLog)
+      return Response.json({ error: "Call log not found." }, { status: 404 });
 
-  const callLog = await getCallLogById(callLogId);
-  if (!callLog) return Response.json({ error: "Call log not found." }, { status: 404 });
+    const order = callLog.order;
+    if (!order)
+      return Response.json({ error: "Order not found." }, { status: 404 });
 
-  const order = callLog.order;
-  if (!order) return Response.json({ error: "Order not found." }, { status: 404 });
+    if (callLog.status === CALL_STATUS.IN_PROGRESS) {
+      return Response.json({
+        warning: true,
+        message: "Call already in progress.",
+      });
+    }
+    if (callLog.status === CALL_STATUS.COMPLETED) {
+      return Response.json({
+        warning: true,
+        message: "Order already completed.",
+      });
+    }
+    if (callLog.retryCount >= MAX_RETRIES) {
+      return Response.json({ warning: true, message: "Max retries reached." });
+    }
 
-  if (callLog.status === CALL_STATUS.IN_PROGRESS) {
-    return Response.json({ warning: true, message: "Call already in progress." });
-  }
-  if (callLog.status === CALL_STATUS.COMPLETED) {
-    return Response.json({ warning: true, message: "Order already completed." });
-  }
-  if (callLog.retryCount >= MAX_RETRIES) {
-    return Response.json({ warning: true, message: "Max retries reached." });
-  }
+    try {
+      const origin = new URL(request.url).origin;
+      await setCallLogInProgress(callLogId);
 
-  try {
-    const origin = new URL(request.url).origin;
-    await setCallLogInProgress(callLogId);
+      const vapiRes = await triggerOrderConfirmationCall({
+        callLogId,
+        customerName: order.customerName,
+        phoneNumber: order.phoneNumber,
+        storeName: order.storeName,
+        orderId: order.shopifyOrderId,
+        totalPrice: order.totalPrice,
+        overrideBaseUrl: origin,
+      });
 
-    const vapiRes = await triggerOrderConfirmationCall({
-      callLogId,
-      customerName: order.customerName,
-      phoneNumber: order.phoneNumber,
-      storeName: order.storeName,
-      orderId: order.shopifyOrderId,
-      totalPrice: order.totalPrice,
-      overrideBaseUrl: origin,
-    });
+      if (vapiRes?.id) await updateCallLogVapiId(callLogId, vapiRes.id);
 
-    if (vapiRes?.id) await updateCallLogVapiId(callLogId, vapiRes.id);
-    
-    console.log(
-      `[OrdersAction] ACTION=RECALL_START orderId=${order.id} callLogId=${callLogId} ` +
-      `vapiCallId=${vapiRes?.id ?? "n/a"}`
-    );
+      console.log(
+        `[OrdersAction] ACTION=RECALL_START orderId=${order.id} callLogId=${callLogId} ` +
+          `vapiCallId=${vapiRes?.id ?? "n/a"}`,
+      );
 
-    return Response.json({
-      success: true,
-      message: `Calling ${order.customerName} for order #${order.shopifyOrderId}`,
-    });
-  } catch (err) {
-    if (isPermanentOrderVapiError(err)) {
-      const reason = String(err?.message ?? "").toLowerCase();
-      const mappedIntent =
-        reason.includes("wrong number") || reason.includes("invalid")
-          ? CALL_INTENT.WRONG_NUMBER
-          : CALL_INTENT.RECALL_REQUEST;
+      return Response.json({
+        success: true,
+        message: `Calling ${order.customerName} for order #${order.shopifyOrderId}`,
+      });
+    } catch (err) {
+      if (isPermanentOrderVapiError(err)) {
+        const reason = String(err?.message ?? "").toLowerCase();
+        const mappedIntent =
+          reason.includes("wrong number") || reason.includes("invalid")
+            ? CALL_INTENT.WRONG_NUMBER
+            : CALL_INTENT.RECALL_REQUEST;
 
-      await handleCallResult(order.id, mappedIntent, {
+        await handleCallResult(order.id, mappedIntent, {
+          callLogId,
+          failureReason: err.message,
+        }).catch(() => {});
+
+        return Response.json(
+          { error: `Permanent error: ${err.message}` },
+          { status: 422 },
+        );
+      }
+
+      await handleCallResult(order.id, CALL_INTENT.RECALL_REQUEST, {
         callLogId,
         failureReason: err.message,
       }).catch(() => {});
 
-      return Response.json({ error: `Permanent error: ${err.message}` }, { status: 422 });
+      return Response.json(
+        { error: `Retry scheduled: ${err.message}` },
+        { status: 500 },
+      );
     }
-
-    await handleCallResult(order.id, CALL_INTENT.RECALL_REQUEST, {
-      callLogId,
-      failureReason: err.message,
-    }).catch(() => {});
-
-    return Response.json({ error: `Retry scheduled: ${err.message}` }, { status: 500 });
   }
+
+
+
+  // New action handlers
+  const actionType = formData.get("action");
+  const orderId = formData.get("orderId");
+  const callLogId = formData.get("callLogId");
+
+  if (actionType === "retry") {
+    await retryCallLog(callLogId);
+    return { success: true };
+  }
+
+  if (actionType === "manual_confirm") {
+    await handleCallResult(orderId, CALL_INTENT.CONFIRM, {
+      callLogId,
+      failureReason: "Manually confirmed from UI",
+    });
+    return { success: true };
+  }
+
+  if (actionType === "manual_cancel") {
+    await handleCallResult(orderId, CALL_INTENT.CANCEL, {
+      callLogId,
+      failureReason: "Manually cancelled from UI",
+    });
+    return { success: true };
+  }
+
+  return Response.json({ error: "Unknown intent." }, { status: 400 });
 };
 
 const ORDER_STATUS_COLOR = {

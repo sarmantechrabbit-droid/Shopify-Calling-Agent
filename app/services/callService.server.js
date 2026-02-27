@@ -17,19 +17,13 @@
  */
 
 import prisma from "../db.server.js";
+import { GENERAL_CALL_STATUS, GENERAL_MAX_RETRIES } from "../constants.js";
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+const CALL_STATUS = GENERAL_CALL_STATUS;
+const MAX_RETRIES = GENERAL_MAX_RETRIES;
 
-export const CALL_STATUS = {
-  PENDING: "pending",
-  CALLING: "calling",
-  ANSWERED: "answered",
-  FAILED: "failed",
-  RETRYING: "retrying",
-};
+export { CALL_STATUS, MAX_RETRIES };
 
-/** Maximum number of *retry* attempts (not counting the initial call). */
-export const MAX_RETRIES = 3;
 
 /** How long to wait between retry attempts. */
 export const RETRY_DELAY_MS = 5 * 60 * 1000; // 5 minutes

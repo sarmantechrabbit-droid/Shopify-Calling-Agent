@@ -1,4 +1,18 @@
 ﻿// app/routes/api.order-vapi-webhook.jsx
+import {
+  CALL_INTENT,
+  getCallLogById,
+  getCallLogByVapiId,
+  handleCallResult,
+  setCallLogInProgress,
+} from "../services/orderCallService.server.js";
+
+import {
+  ASSISTANT_INTENT_MAP,
+  scanForIntent,
+  scanTranscript,
+  getVapiCallIntent,
+} from "../services/vapiOrderService.server.js";
 
 const TERMINAL_EVENTS = new Set([
   "end-of-call-report",
@@ -47,52 +61,37 @@ function extractTranscript(body) {
   );
 }
 
-export const action = async ({ request }) => {
-  const {
-    CALL_INTENT,
-    getCallLogById,
-    getCallLogByVapiId,
-    handleCallResult,
-    setCallLogInProgress,
-  } = await import("../services/orderCallService.server.js");
+const pollVapi = async (orderId, callLogId, vapiId) => {
+  console.log(`[VapiPoll] 🛰️ Monitoring Call ${vapiId}...`);
 
-  const {
-    ASSISTANT_INTENT_MAP,
-    scanForIntent,
-    scanTranscript,
-    getVapiCallIntent,
-  } = await import("../services/vapiOrderService.server.js");
+  for (let i = 1; i <= 6; i++) {
+    await new Promise((r) => setTimeout(r, 5000));
+    console.log(`[VapiPoll] Attempt ${i}/6 checking Vapi API for ${vapiId}...`);
 
-  const pollVapi = async (orderId, callLogId, vapiId) => {
-    console.log(`[VapiPoll] 🛰️ Monitoring Call ${vapiId}...`);
-
-    for (let i = 1; i <= 6; i++) {
-      await new Promise((r) => setTimeout(r, 5000));
-      console.log(`[VapiPoll] Attempt ${i}/6 checking Vapi API for ${vapiId}...`);
-
-      const intent = await getVapiCallIntent(vapiId);
-      if (intent) {
-        console.log(`[VapiPoll] ✅ Found intent: ${intent}`);
-        pushPayload("POLL_MATCH", vapiId, intent);
-        await handleCallResult(orderId, intent, {
-          callLogId,
-          vapiCallId: vapiId,
-        });
-        return;
-      }
+    const intent = await getVapiCallIntent(vapiId);
+    if (intent) {
+      console.log(`[VapiPoll] ✅ Found intent: ${intent}`);
+      pushPayload("POLL_MATCH", vapiId, intent);
+      await handleCallResult(orderId, intent, {
+        callLogId,
+        vapiCallId: vapiId,
+      });
+      return;
     }
+  }
 
-    console.log(
-      `[VapiPoll] 🛑 No intent found for ${vapiId}. Scheduling retry...`,
-    );
-    pushPayload("POLL_NO_ANSWER", vapiId, "recall_request");
-    await handleCallResult(orderId, CALL_INTENT.RECALL_REQUEST, {
-      callLogId,
-      vapiCallId: vapiId,
-      failureReason: "No answer or no clear intent detected after polling",
-    });
-  };
+  console.log(
+    `[VapiPoll] 🛑 No intent found for ${vapiId}. Scheduling retry...`,
+  );
+  pushPayload("POLL_NO_ANSWER", vapiId, "recall_request");
+  await handleCallResult(orderId, CALL_INTENT.RECALL_REQUEST, {
+    callLogId,
+    vapiCallId: vapiId,
+    failureReason: "No answer or no clear intent detected after polling",
+  });
+};
 
+export const action = async ({ request }) => {
   const logId = Math.random().toString(36).substring(7);
   console.log(`\n[VapiWebhook][${logId}] 📥 NEW WEBHOOK`);
 
@@ -193,4 +192,5 @@ export const action = async ({ request }) => {
 
   return Response.json({ ok: true });
 };
+
 

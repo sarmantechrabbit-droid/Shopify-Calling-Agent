@@ -1,14 +1,14 @@
 // app/routes/api.calls.upload.jsx
+import { createCallsBatch } from "../services/callService.server.js";
+import {
+  validatePhone,
+  checkAllowedPrefix,
+} from "../utils/validation.server.js";
 
 export const action = async ({ request }) => {
   if (request.method !== "POST") {
     return Response.json({ error: "Method not allowed" }, { status: 405 });
   }
-
-  const { createCallsBatch } = await import("../services/callService.server.js");
-  const { validatePhone, checkAllowedPrefix } = await import(
-    "../utils/validation.server.js"
-  );
 
   let body;
   try {
@@ -104,4 +104,5 @@ export const action = async ({ request }) => {
     );
   }
 };
+
 

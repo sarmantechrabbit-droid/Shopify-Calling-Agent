@@ -1,22 +1,22 @@
 // app/routes/api.calls.start.jsx
+import {
+  getAllPendingCalls,
+  setCallCalling,
+  setCallRetrying,
+  markCallFailed,
+  updateCallWithVapiId,
+  MAX_RETRIES,
+} from "../services/callService.server.js";
+
+import {
+  initiateVapiCall,
+  isPermanentVapiError,
+} from "../services/vapiService.server.js";
 
 export const action = async ({ request }) => {
   if (request.method !== "POST") {
     return Response.json({ error: "Method not allowed" }, { status: 405 });
   }
-
-  const {
-    getAllPendingCalls,
-    setCallCalling,
-    setCallRetrying,
-    markCallFailed,
-    updateCallWithVapiId,
-    MAX_RETRIES,
-  } = await import("../services/callService.server.js");
-
-  const { initiateVapiCall, isPermanentVapiError } = await import(
-    "../services/vapiService.server.js"
-  );
 
   let pending;
   try {
@@ -101,4 +101,5 @@ export const action = async ({ request }) => {
     ...(results.errors.length > 0 ? { errors: results.errors } : {}),
   });
 };
+
 
