@@ -148,19 +148,19 @@ export const action = async ({ request }) => {
     if (!order)
       return Response.json({ error: "Order not found." }, { status: 404 });
 
-    if (callLog.status === CALL_STATUS.IN_PROGRESS) {
+    if (callLog.status === ORDER_CALL_STATUS.IN_PROGRESS) {
       return Response.json({
         warning: true,
         message: "Call already in progress.",
       });
     }
-    if (callLog.status === CALL_STATUS.COMPLETED) {
+    if (callLog.status === ORDER_CALL_STATUS.COMPLETED) {
       return Response.json({
         warning: true,
         message: "Order already completed.",
       });
     }
-    if (callLog.retryCount >= MAX_RETRIES) {
+    if (callLog.retryCount >= ORDER_MAX_RETRIES) {
       return Response.json({ warning: true, message: "Max retries reached." });
     }
 
@@ -220,33 +220,6 @@ export const action = async ({ request }) => {
     }
   }
 
-
-
-  // New action handlers
-  const actionType = formData.get("action");
-  const orderId = formData.get("orderId");
-  const callLogId = formData.get("callLogId");
-
-  if (actionType === "retry") {
-    await retryCallLog(callLogId);
-    return { success: true };
-  }
-
-  if (actionType === "manual_confirm") {
-    await handleCallResult(orderId, CALL_INTENT.CONFIRM, {
-      callLogId,
-      failureReason: "Manually confirmed from UI",
-    });
-    return { success: true };
-  }
-
-  if (actionType === "manual_cancel") {
-    await handleCallResult(orderId, CALL_INTENT.CANCEL, {
-      callLogId,
-      failureReason: "Manually cancelled from UI",
-    });
-    return { success: true };
-  }
 
   return Response.json({ error: "Unknown intent." }, { status: 400 });
 };

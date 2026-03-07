@@ -13,6 +13,9 @@
 
 // app/routes/app._index.jsx
 
+import { useState, useEffect, useCallback } from "react";
+import { useLoaderData, useFetcher, useRevalidator } from "react-router";
+import { useAppBridge } from "@shopify/app-bridge-react";
 import { GENERAL_CALL_STATUS, GENERAL_MAX_RETRIES } from "../constants.js";
 import { authenticate } from "../shopify.server";
 import {
@@ -797,4 +800,4 @@ export default function Dashboard() {
   );
 }
 
-export const headers = (headersArgs) => boundary.headers(headersArgs);
+
