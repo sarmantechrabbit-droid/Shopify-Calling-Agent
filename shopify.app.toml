@@ -2,7 +2,7 @@
 
 name = "ai-agent"
 client_id = "ec8ee5876b94cf63a30f4b66ed82a7c3"
-application_url = "https://shopify-calling-agent-6.onrender.com"
+application_url = "https://shopify-calling-agent.vercel.app/"
 embedded = true
 
 [build]
@@ -30,8 +30,8 @@ scopes = "write_metaobject_definitions,write_metaobjects,write_products,read_ord
 
 [auth]
 redirect_urls = [
-  "https://shopify-calling-agent-6.onrender.com/auth/callback",
-  "https://shopify-calling-agent-6.onrender.com/auth/shopify/callback"
+  "https://shopify-calling-agent.vercel.app/auth/callback",
+  "https://shopify-calling-agent.vercel.app/auth/shopify/callback"
 ]
 
 [product.metafields.app.demo_info]

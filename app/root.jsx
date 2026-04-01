@@ -1,4 +1,6 @@
 import { Links, Meta, Outlet, Scripts, ScrollRestoration } from "react-router";
+import "./styles/tailwind.css";
+import { ThemeProvider } from "./contexts/ThemeContext.jsx";
 
 export default function App() {
   return (
@@ -11,11 +13,26 @@ export default function App() {
           rel="stylesheet"
           href="https://cdn.shopify.com/static/fonts/inter/v4/styles.css"
         />
+        <link
+          rel="preconnect"
+          href="https://fonts.googleapis.com"
+        />
+        <link
+          rel="preconnect"
+          href="https://fonts.gstatic.com"
+          crossOrigin="anonymous"
+        />
+        <link
+          href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+          rel="stylesheet"
+        />
         <Meta />
         <Links />
       </head>
-      <body>
-        <Outlet />
+      <body className="transition-colors duration-300 touch-manipulation">
+        <ThemeProvider>
+          <Outlet />
+        </ThemeProvider>
         <ScrollRestoration />
         <Scripts />
       </body>

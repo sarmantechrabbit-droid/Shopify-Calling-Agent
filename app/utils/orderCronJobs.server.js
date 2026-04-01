@@ -1,4 +1,4 @@
-﻿import {
+import {
   CALL_INTENT,
   MAX_RETRIES,
   claimDueRetryCallLogs,
@@ -6,6 +6,8 @@
   claimStaleQueuedCallLogs,
   handleCallResult,
   updateCallLogVapiId,
+  setCallLogInProgress,
+  claimTimedOutWhatsAppLogs,
 } from "../services/orderCallService.server.js";
 import {
   triggerOrderConfirmationCall,
@@ -88,7 +90,7 @@ export function startOrderCronJobs() {
               orderId: callLog.order.shopifyOrderId,
               totalPrice: callLog.order.totalPrice,
            });
-           if (vres?.id) await updateCallLogVapiId(callLog.id, vres.id);
+           if (vres?.id) await setCallLogInProgress(callLog.id, vres.id);
          } catch(e) {
             console.error("[OrderCron] Error triggering queued call", e.message);
          }
@@ -108,12 +110,42 @@ export function startOrderCronJobs() {
             orderId: order.shopifyOrderId,
             totalPrice: order.totalPrice,
           });
-          if (vapiRes?.id) await updateCallLogVapiId(callLog.id, vapiRes.id);
+          if (vapiRes?.id) await setCallLogInProgress(callLog.id, vapiRes.id);
         } catch (err) {
           await handleCallResult(order.id, CALL_INTENT.RECALL_REQUEST, {
             callLogId: callLog.id,
             failureReason: `Retry trigger failed: ${err.message}`,
           });
+        }
+      }
+
+      // 4) Handle WhatsApp timeouts (Fallback to AI Call)
+      const config = await prisma.appConfig.findFirst({ where: { shop: "default" } });
+      const timeoutMinutes = config?.waTimeoutMinutes ?? 5;
+      const timeoutSeconds = timeoutMinutes * 60;
+
+      const timedOutWA = await claimTimedOutWhatsAppLogs(timeoutSeconds, 25);
+      for (const callLog of timedOutWA) {
+        const order = callLog.order;
+        if (!order) continue;
+        console.log(`[OrderCron] 📞 WhatsApp timed out for order=${order.id}, triggering fallback call...`);
+        try {
+          const vapiRes = await triggerOrderConfirmationCall({
+            callLogId: callLog.id,
+            customerName: order.customerName,
+            phoneNumber: order.phoneNumber,
+            storeName: order.storeName,
+            orderId: order.shopifyOrderId,
+            totalPrice: order.totalPrice,
+          });
+          if (vapiRes?.id) await setCallLogInProgress(callLog.id, vapiRes.id);
+        } catch (err) {
+          console.error(`[OrderCron] Failed to trigger fallback call for order=${order.id}`, err.message);
+          // Release lock so it can be retried or handled later
+          await prisma.callLog.update({
+            where: { id: callLog.id },
+            data: { lockedAt: null }
+          }).catch(() => {});
         }
       }
     } catch (err) {

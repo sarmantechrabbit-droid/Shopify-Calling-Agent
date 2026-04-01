@@ -4,6 +4,10 @@
  * Periodically checks for unreplied WhatsApp messages and sends a second
  * reminder after 1 minute of no customer response.
  *
+ * After the second reminder, if the customer still doesn't reply within
+ * FINAL_TIMEOUT_MS, the order is escalated to PENDING_MANUAL_REVIEW
+ * and the callLog status changes to FAILED.
+ *
  * Uses setInterval (10s) — NOT cron.
  * Uses a global singleton guard to prevent duplicate intervals under Vite HMR.
  */
@@ -14,6 +18,7 @@ import twilio from "twilio";
 // ── Configuration ─────────────────────────────────────────────────────────────
 const REMINDER_CHECK_INTERVAL_MS = 10_000; // Check every 10 seconds
 const REMINDER_DELAY_MS = 60_000;          // Send reminder after 1 minute
+const FINAL_TIMEOUT_MS = 5 * 60_000;       // Escalate 5 mins after second reminder
 const REMINDER_MESSAGE = "Reminder: Please confirm your order by replying YES or NO.";
 
 // ── Twilio Helpers ────────────────────────────────────────────────────────────
@@ -54,15 +59,23 @@ async function sendReminder(callLog) {
   const from = getWhatsAppFrom();
   const to = formatWhatsAppNumber(callLog.order.phoneNumber);
 
+  const { order } = callLog;
+  const body = 
+    `Reminder for ${order.customerName}:\n` +
+    `Order ID: ${order.shopifyOrderId}\n` +
+    `Total: ₹${order.totalPrice}\n` +
+    (order.address ? `Address: ${order.address}\n\n` : "\n") +
+    `Please confirm your order by replying YES or NO.`;
+
   console.log(
-    `[Reminder] Sending second reminder to ${to} for orderId=${callLog.order.id} callLogId=${callLog.id}`
+    `[Reminder] Sending second reminder to ${to} for orderId=${order.id} callLogId=${callLog.id}`
   );
 
   try {
     const message = await client.messages.create({
       from,
       to,
-      body: REMINDER_MESSAGE,
+      body,
     });
 
     console.log(`[Reminder] ✅ Reminder sent SID=${message.sid} to=${to}`);
@@ -98,6 +111,9 @@ async function checkAndSendReminders() {
       },
       include: { order: true },
     });
+
+    const config = await prisma.appConfig.findFirst({ where: { shop: "default" } });
+    if (config && config.waAutoConfirm === false) return;
 
     if (pendingReminders.length === 0) return;
 
@@ -151,6 +167,91 @@ async function checkAndSendReminders() {
   }
 }
 
+// ── Core: Escalate timed-out WhatsApp orders ──────────────────────────────────
+
+/**
+ * After the second reminder has been sent and FINAL_TIMEOUT_MS has passed
+ * with no customer reply, escalate:
+ *   - callLog.status  →  FAILED
+ *   - order.orderStatus  →  PENDING_MANUAL_REVIEW
+ *
+ * This prevents orders from being stuck forever in WHATSAPP_SENT status.
+ */
+async function escalateTimedOutWhatsApp() {
+  try {
+    const cutoff = new Date(Date.now() - FINAL_TIMEOUT_MS);
+
+    // Call logs where:
+    //   - Status is still WHATSAPP_SENT
+    //   - Second reminder WAS already sent
+    //   - Customer still hasn't replied
+    //   - Enough time has passed since the WhatsApp was first sent
+    const timedOut = await prisma.callLog.findMany({
+      where: {
+        status: "WHATSAPP_SENT",
+        secondReminderSent: true,
+        whatsappReplied: false,
+        whatsappSentAt: { lte: cutoff },
+      },
+      include: { order: true },
+    });
+
+    if (timedOut.length === 0) return;
+
+    console.log(
+      `[Reminder] ⏰ Found ${timedOut.length} timed-out WhatsApp order(s) — escalating to PENDING_MANUAL_REVIEW...`
+    );
+
+    for (const callLog of timedOut) {
+      try {
+        // Skip if order is already in a terminal state
+        if (
+          callLog.order &&
+          (callLog.order.orderStatus === "CONFIRMED" ||
+           callLog.order.orderStatus === "CANCELLED" ||
+           callLog.order.orderStatus === "INVALID")
+        ) {
+          // Just fix the callLog status to FAILED so it's not stuck
+          await prisma.callLog.update({
+            where: { id: callLog.id },
+            data: { status: "FAILED" },
+          });
+          console.log(
+            `[Reminder] Order ${callLog.order?.id} already terminal (${callLog.order?.orderStatus}) — marked callLog ${callLog.id} as FAILED`
+          );
+          continue;
+        }
+
+        // Escalate: update both callLog and order
+        await prisma.$transaction([
+          prisma.callLog.update({
+            where: { id: callLog.id },
+            data: {
+              status: "FAILED",
+              failureReason: "No WhatsApp reply after second reminder",
+            },
+          }),
+          prisma.order.update({
+            where: { id: callLog.orderId },
+            data: { orderStatus: "PENDING_MANUAL_REVIEW" },
+          }),
+        ]);
+
+        console.log(
+          `[Reminder] ⏰ Escalated callLogId=${callLog.id} orderId=${callLog.orderId} → status=FAILED, orderStatus=PENDING_MANUAL_REVIEW`
+        );
+      } catch (err) {
+        console.error(
+          `[Reminder] ❌ Error escalating callLogId=${callLog.id}:`,
+          err.message
+        );
+      }
+    }
+  } catch (err) {
+    console.error("[Reminder] ❌ Global escalation check failed:", err.message);
+  }
+}
+
 // ── Boot: Start Reminder Interval ─────────────────────────────────────────────
 
 // eslint-disable-next-line no-undef
@@ -168,10 +269,17 @@ export function startReminderService() {
 
   console.log(
     `[Reminder] 🚀 Reminder service started (checking every ${REMINDER_CHECK_INTERVAL_MS / 1000}s, ` +
-    `reminder delay: ${REMINDER_DELAY_MS / 1000}s)`
+    `reminder delay: ${REMINDER_DELAY_MS / 1000}s, ` +
+    `final timeout: ${FINAL_TIMEOUT_MS / 1000}s)`
   );
 
+  // Combined check: send reminders + escalate timed-out orders
+  async function runChecks() {
+    await checkAndSendReminders();
+    await escalateTimedOutWhatsApp();
+  }
+
   // Run once immediately, then on interval
-  checkAndSendReminders();
-  g.__aiAgentReminderIntervalId = setInterval(checkAndSendReminders, REMINDER_CHECK_INTERVAL_MS);
+  runChecks();
+  g.__aiAgentReminderIntervalId = setInterval(runChecks, REMINDER_CHECK_INTERVAL_MS);
 }

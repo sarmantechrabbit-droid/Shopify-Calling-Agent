@@ -1,4 +1,4 @@
-﻿// app/routes/webhooks.orders.create.jsx
+// app/routes/webhooks.orders.create.jsx
 import { authenticate } from "../shopify.server";
 import {
   CALL_INTENT,
@@ -12,6 +12,8 @@ import {
   triggerOrderConfirmationCall,
   isPermanentOrderVapiError,
 } from "../services/vapiOrderService.server.js";
+import { sendWhatsAppFallback } from "../utils/whatsappFallback.server.js";
+import prisma from "../db.server.js";
 
 function isCOD(payload) {
   const gateway = String(payload?.gateway ?? "").toLowerCase();
@@ -49,6 +51,14 @@ function extractPhone(payload) {
   return null;
 }
 
+function buildAddress(payload) {
+  const addr = payload?.shipping_address || payload?.billing_address;
+  if (!addr) return null;
+  return [addr.address1, addr.address2, addr.city, addr.province, addr.zip, addr.country]
+    .filter(Boolean)
+    .join(", ");
+}
+
 function getDefaultAgentPhone() {
   const raw = String(process.env.DEFAULT_AGENT_PHONE ?? "").trim();
   if (!raw) return null;
@@ -73,6 +83,7 @@ function buildOrderInput(shop, payload) {
     storeName: String(shop).replace(".myshopify.com", ""),
     totalPrice: String(payload.total_price ?? "0"),
     orderPlacedDate: new Date(payload.created_at ?? Date.now()),
+    address: buildAddress(payload),
   };
 }
 
@@ -102,10 +113,51 @@ export const action = async ({ request }) => {
     return new Response(null, { status: 200 });
   }
 
+  const config = await prisma.appConfig.findFirst({
+    where: {
+      OR: [
+        { shop: shop },
+        { shop: "default" }
+      ]
+    },
+    orderBy: { id: "asc" } // "default" usually comes first if id is "default"
+  });
+  const whatsappEnabled = config?.whatsappEnabled ?? true;
+
+  if (whatsappEnabled) {
+    try {
+      // 1. Mark as WhatsApp Sent
+      await prisma.callLog.update({
+        where: { id: callLog.id },
+        data: {
+          status: "WHATSAPP_SENT",
+          whatsappSentAt: new Date(),
+        },
+      });
+
+      // 2. Send WhatsApp
+      const fullCallLog = { ...callLog, order };
+      await sendWhatsAppFallback(fullCallLog);
+
+      console.log(`[OrderCreate] WhatsApp flow initiated for orderId=${order.id}`);
+    } catch (err) {
+      console.error(`[OrderCreate] WhatsApp flow failed for orderId=${order.id}, falling back to call`, err);
+      // Fallback to call logic if WhatsApp send fails
+      await initiateCallFlow(order, callLog, input, request.url);
+    }
+  } else {
+    // Direct AI Call flow
+    await initiateCallFlow(order, callLog, input, request.url);
+  }
+
+  return new Response(null, { status: 200 });
+};
+
+async function initiateCallFlow(order, callLog, input, requestUrl) {
   try {
     await setCallLogInProgress(callLog.id);
 
-    const origin = new URL(request.url).origin;
+    const origin = new URL(requestUrl).origin;
     const vapiRes = await triggerOrderConfirmationCall({
       callLogId: callLog.id,
       customerName: input.customerName,
@@ -135,8 +187,8 @@ export const action = async ({ request }) => {
       const reason = String(err?.message ?? "").toLowerCase();
       const intent =
         reason.includes("wrong number") || reason.includes("invalid")
-          ? CALL_INTENT.WRONG_NUMBER
-          : CALL_INTENT.RECALL_REQUEST;
+          ? "WRONG_NUMBER"
+          : "RECALL_REQUEST";
       await handleCallResult(order.id, intent, {
         callLogId: callLog.id,
         failureReason: err.message,
@@ -144,7 +196,7 @@ export const action = async ({ request }) => {
         console.error("[OrderCreate] handleCallResult permanent failed", e),
       );
     } else {
-      await handleCallResult(order.id, CALL_INTENT.RECALL_REQUEST, {
+      await handleCallResult(order.id, "RECALL_REQUEST", {
         callLogId: callLog.id,
         failureReason: err.message,
       }).catch((e) =>
@@ -152,8 +204,6 @@ export const action = async ({ request }) => {
       );
     }
   }
-
-  return new Response(null, { status: 200 });
-};
+}
 
 

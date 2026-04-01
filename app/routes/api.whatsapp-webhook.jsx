@@ -8,6 +8,13 @@ import {
 } from "../services/orderCallService.server.js";
 
 /**
+ * GET /api/whatsapp-webhook — health check so you can verify the URL works.
+ */
+export const loader = async () => {
+  return new Response("WhatsApp webhook is reachable ✅", { status: 200 });
+};
+
+/**
  * Normalize the incoming phone number from Twilio's "whatsapp:+91XXXXXXXXXX" format
  * to a plain E.164 number "+91XXXXXXXXXX".
  */
@@ -91,11 +98,9 @@ export const action = async ({ request }) => {
   if (!intent) {
     logWA("IGNORED_UNKNOWN_REPLY", { logId, messageBody });
     const helpMessage =
-      `Sorry, we didn't understand your reply.\n\n` +
-      `Please reply:\n` +
-      `1 - YES (Confirm)\n` +
-      `2 - NO (Cancel)\n` +
-      `3 - I did not place this order`;
+      `Sorry, we didn't understand your reply. Please reply:\n\n` +
+      `YES to confirm ✅\n` +
+      `NO to cancel ❌`;
     return new Response(
       `<Response><Message>${helpMessage}</Message></Response>`,
       { status: 200, headers: { "Content-Type": "text/xml" } },
@@ -143,9 +148,23 @@ export const action = async ({ request }) => {
   }
 
   try {
+    const intentLabel =
+      intent === CALL_INTENT.CONFIRM ? "Confirmed" :
+      intent === CALL_INTENT.CANCEL ? "Cancelled" :
+      intent === CALL_INTENT.WRONG_NUMBER ? "Wrong Number" : "Responded";
+
+    logWA("PROCESSING", {
+      logId,
+      callLogId: callLog.id,
+      orderId: callLog.orderId,
+      intent,
+      callLogStatus: callLog.status,
+      orderStatus: callLog.order?.orderStatus,
+    });
+
     const result = await handleCallResult(callLog.orderId, intent, {
       callLogId: callLog.id,
-      failureReason: "Confirmed via WhatsApp",
+      failureReason: `${intentLabel} via WhatsApp`,
       fromWhatsApp: true,
     });
 

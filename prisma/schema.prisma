@@ -1,16 +1,120 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
 generator client {
   provider = "prisma-client-js"
 }
 
-// Set DATABASE_URL in your .env file.
-// Development example:  DATABASE_URL="postgresql://postgres:root@localhost:5432/ai_agent_db"
-// Production example:   DATABASE_URL="postgresql://user:pass@host:5432/ai_agent_db?sslmode=require"
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+model CustomerCall {
+  id            String    @id @default(cuid())
+  customerName  String
+  phone         String
+  status        String    @default("pending")
+  retryCount    Int       @default(0)
+  vapiCallId    String?
+  lastCallAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  failureReason String?
+  nextRetryAt   DateTime?
+}
+
+model Order {
+  id                 String    @id @default(cuid())
+  shopifyOrderId     String    @unique
+  customerName       String
+  phoneNumber        String
+  storeName          String
+  totalPrice         String
+  orderPlacedDate    DateTime
+  orderStatus        String    @default("PENDING")
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  address            String?
+  communicationLog   Json?
+  confirmationStatus String    @default("pending")
+  callLogs           CallLog[]
+}
+
+model CallLog {
+  id                 String    @id @default(cuid())
+  orderId            String
+  vapiCallId         String?
+  status             String    @default("QUEUED")
+  retryCount         Int       @default(0)
+  nextRetryAt        DateTime?
+  failureReason      String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  lastIntent         String?
+  lockedAt           DateTime?
+  whatsappRepliedAt  DateTime?
+  whatsappSentAt     DateTime?
+  secondReminderSent Boolean   @default(false)
+  whatsappReplied    Boolean   @default(false)
+  order              Order     @relation(fields: [orderId], references: [id])
+
+  @@index([orderId])
+  @@index([vapiCallId])
+  @@index([status, nextRetryAt])
+}
+
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+model AppConfig {
+  id               String   @id @default("default")
+  shop             String   @unique @default("default")
+  waAutoConfirm    Boolean  @default(true)
+  waUpdateNotify   Boolean  @default(true)
+  waAutoReplies    Boolean  @default(true)
+  initialDelay     String   @default("immediate")
+  retryInterval    String   @default("2hours")
+  selectedVoice    String   @default("Sarah")
+  activeScriptId   String?
+  vapiApiKey       String   @default("")
+  vapiPhoneId      String   @default("")
+  vapiAssistantId  String   @default("")
+  callLanguage     String   @default("hindi")
+  twilioSid        String   @default("")
+  twilioToken      String   @default("")
+  twilioWaFrom     String   @default("")
+  maxRetries       Int      @default(3)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  whatsappEnabled  Boolean  @default(true)
+  waTimeoutMinutes Int      @default(5)
+}
+
+model Script {
+  id        String   @id @default(cuid())
+  shop      String   @default("default")
+  name      String
+  body      String
+  isActive  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([shop])
 }
 
 enum OrderStatus {
@@ -28,86 +132,4 @@ enum CallStatus {
   RETRY_SCHEDULED
   FAILED
   WHATSAPP_SENT
-}
-
-model CustomerCall {
-  id            String    @id @default(cuid())
-  customerName  String
-  phone         String
-  // pending | calling | answered | failed | retrying
-  status        String    @default("pending")
-  retryCount    Int       @default(0)
-  // nextRetryAt: when the cron should attempt the next retry
-  nextRetryAt   DateTime?
-  // vapiCallId / callSid: the call ID returned by Vapi (or Twilio)
-  vapiCallId    String?
-  // failureReason: last error message from Vapi / internal error
-  failureReason String?
-  lastCallAt    DateTime?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-}
-
-// ─── Order Confirmation Models ────────────────────────────────────────────────
-
-model Order {
-  id              String    @id @default(cuid())
-  // Shopify order ID (numeric string) — unique per shop
-  shopifyOrderId  String    @unique
-  customerName    String
-  // E.164 phone extracted from Shopify order
-  phoneNumber     String
-  storeName       String
-  // Raw decimal string from Shopify, e.g. "599.00"
-  totalPrice      String
-  orderPlacedDate DateTime
-  orderStatus     String      @default("PENDING")
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  callLogs        CallLog[]
-}
-
-model CallLog {
-  id            String    @id @default(cuid())
-  orderId       String
-  order         Order     @relation(fields: [orderId], references: [id])
-  // The Vapi call ID — used to correlate webhook events
-  vapiCallId    String?
-  status        String    @default("QUEUED")
-  // Number of retry attempts made by cron (not counting initial call)
-  retryCount    Int       @default(0)
-  nextRetryAt   DateTime?
-  failureReason String?
-  lastIntent        String?
-  lockedAt          DateTime?
-  whatsappSentAt    DateTime?
-  whatsappRepliedAt DateTime?
-  whatsappReplied   Boolean   @default(false)
-  secondReminderSent Boolean  @default(false)
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
-
-  @@index([orderId])
-  @@index([vapiCallId])
-  @@index([status, nextRetryAt])
-}
-
-model Session {
-  id            String    @id
-  shop          String
-  state         String
-  isOnline      Boolean   @default(false)
-  scope         String?
-  expires       DateTime?
-  accessToken   String
-  userId        BigInt?
-  firstName     String?
-  lastName      String?
-  email         String?
-  accountOwner  Boolean   @default(false)
-  locale        String?
-  collaborator  Boolean?  @default(false)
-  emailVerified Boolean?  @default(false)
-  refreshToken        String?
-  refreshTokenExpires DateTime?
 }

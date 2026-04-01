@@ -1,12 +1,11 @@
-﻿/**
+/**
  * Vapi AI Phone Call Service
  * Handles all communication with the Vapi REST API.
  *
- * Required env vars:
- *   VAPI_API_KEY          - Your Vapi secret key
- *   VAPI_PHONE_NUMBER_ID  - The Vapi phone number ID to call from
- *   VAPI_ASSISTANT_ID     - The Vapi assistant ID to use for the call
+ * Reads config from AppConfig DB table first, falls back to env vars.
  */
+
+import prisma from "../db.server.js";
 
 const VAPI_BASE_URL = "https://api.vapi.ai";
 
@@ -23,8 +22,28 @@ export function isPermanentVapiError(err) {
   return err instanceof VapiRequestError && err.retryable === false;
 }
 
-function buildFirstMessage(customerName) {
+async function buildFirstMessage(customerName) {
   const safeName = String(customerName ?? "").trim();
+
+  // Try reading the active script from DB
+  try {
+    const activeScript = await prisma.script.findFirst({
+      where: { shop: "default", isActive: true },
+    });
+    if (activeScript && activeScript.body) {
+      return activeScript.body
+        .replace(/\{\{CUSTOMER_NAME\}\}/g, safeName || "Customer")
+        .replace(/\{\{ORDER_ID\}\}/g, "")
+        .replace(/\{\{TOTAL\}\}/g, "")
+        .replace(/\{\{PRODUCT_LIST\}\}/g, "")
+        .replace(/\{\{ADDRESS\}\}/g, "")
+        .replace(/\{\{DELIVERY_DATE\}\}/g, "")
+        .replace(/\{\{STORE_NAME\}\}/g, "");
+    }
+  } catch (_) {
+    // Fallback below
+  }
+
   if (!safeName) return "Hello, how are you today?";
   return `Hi ${safeName}, how are you today?`;
 }
@@ -38,9 +57,21 @@ function buildFirstMessage(customerName) {
  * @returns {Promise<object>} Vapi call object containing at least { id, status }
  */
 export async function initiateVapiCall({ customerName, phone, callId }) {
-  const apiKey = process.env.VAPI_API_KEY;
-  const phoneNumberId = process.env.VAPI_PHONE_NUMBER_ID;
-  const assistantId = process.env.VAPI_ASSISTANT_ID;
+  // Try reading config from DB first
+  let apiKey = process.env.VAPI_API_KEY;
+  let phoneNumberId = process.env.VAPI_PHONE_NUMBER_ID;
+  let assistantId = process.env.VAPI_ASSISTANT_ID;
+
+  try {
+    const dbConfig = await prisma.appConfig.findFirst({ where: { shop: "default" } });
+    if (dbConfig) {
+      if (dbConfig.vapiApiKey) apiKey = dbConfig.vapiApiKey;
+      if (dbConfig.vapiPhoneId) phoneNumberId = dbConfig.vapiPhoneId;
+      if (dbConfig.vapiAssistantId) assistantId = dbConfig.vapiAssistantId;
+    }
+  } catch (_) {
+    // Fallback to env vars
+  }
 
   if (!apiKey || !phoneNumberId || !assistantId) {
     throw new Error(
@@ -51,6 +82,8 @@ export async function initiateVapiCall({ customerName, phone, callId }) {
   // Vapi name field max 40 chars.
   const callName = `AI-${customerName.slice(0, 20)}-${callId.slice(-8)}`;
 
+  const firstMessage = await buildFirstMessage(customerName);
+
   const payload = {
     phoneNumberId,
     assistantId,
@@ -60,7 +93,7 @@ export async function initiateVapiCall({ customerName, phone, callId }) {
     },
     name: callName,
     assistantOverrides: {
-      firstMessage: buildFirstMessage(customerName),
+      firstMessage,
     },
   };
 
@@ -93,3 +126,4 @@ export async function initiateVapiCall({ customerName, phone, callId }) {
   console.log("[Vapi] Call created:", data.id, "status:", data.status);
   return data;
 }
+

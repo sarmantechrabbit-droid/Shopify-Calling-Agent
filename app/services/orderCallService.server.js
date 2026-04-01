@@ -1,4 +1,4 @@
-﻿import prisma from "../db.server.js";
+import prisma from "../db.server.js";
 import { sendWhatsAppFallback } from "../utils/whatsappFallback.server.js";
 import {
   ORDER_STATUS,
@@ -12,10 +12,7 @@ const MAX_RETRIES = ORDER_MAX_RETRIES;
 
 export { ORDER_STATUS, CALL_INTENT, CALL_STATUS, MAX_RETRIES };
 
-
-
-
-export const MAX_NO_RESPONSE_RETRIES = 3; // After 3 NO_RESPONSE retries → WhatsApp fallback
+// Retry delay settings (can also be moved to DB in future)
 export const RETRY_DELAY_BUSY_MS = 5 * 60 * 1000;
 export const RETRY_DELAY_RECALL_MS = 5 * 60 * 1000;
 export const RETRY_DELAY_NO_RESPONSE_MS = 5 * 60 * 1000;
@@ -33,6 +30,24 @@ function logStatus(event, payload) {
   console.log(`[OrderStatus] ${event} ${JSON.stringify(payload)}`);
 }
 
+export async function logCommunicationEvent(orderId, event, tx = prisma) {
+  try {
+    const order = await tx.order.findUnique({ where: { id: orderId } });
+    if (!order) return;
+    const logs = Array.isArray(order.communicationLog) ? [...order.communicationLog] : [];
+    logs.push({
+      timestamp: new Date().toISOString(),
+      event,
+    });
+    await tx.order.update({
+      where: { id: orderId },
+      data: { communicationLog: logs },
+    });
+  } catch (err) {
+    console.error(`[logCommunicationEvent] Failed for orderId=${orderId}:`, err.message);
+  }
+}
+
 export async function createOrderWithCallLog({
   shopifyOrderId,
   customerName,
@@ -40,6 +55,7 @@ export async function createOrderWithCallLog({
   storeName,
   totalPrice,
   orderPlacedDate,
+  address,
 }) {
   return prisma.$transaction(async (tx) => {
     const order = await tx.order.create({
@@ -50,7 +66,15 @@ export async function createOrderWithCallLog({
         storeName,
         totalPrice,
         orderPlacedDate,
+        address,
         orderStatus: ORDER_STATUS.PENDING,
+        confirmationStatus: "pending",
+        communicationLog: [
+          {
+            timestamp: new Date().toISOString(),
+            event: "Order created",
+          },
+        ],
       },
     });
 
@@ -79,7 +103,7 @@ export async function setCallLogInProgress(id, vapiCallId = null) {
   const res = await prisma.callLog.updateMany({
     where: {
       id,
-      status: { in: [CALL_STATUS.QUEUED, CALL_STATUS.RETRY_SCHEDULED, CALL_STATUS.IN_PROGRESS] },
+      status: { in: [CALL_STATUS.QUEUED, CALL_STATUS.RETRY_SCHEDULED, CALL_STATUS.IN_PROGRESS, CALL_STATUS.WHATSAPP_SENT] },
     },
     data: {
       status: CALL_STATUS.IN_PROGRESS,
@@ -151,18 +175,22 @@ export async function handleCallResult(orderId, intent, opts = {}) {
   const normalizedIntent = toIntent(intent);
 
   return prisma.$transaction(async (tx) => {
-    const callLog =
+    const [callLog, config] = await Promise.all([
       (opts.callLogId
-        ? await tx.callLog.findUnique({ where: { id: opts.callLogId }, include: { order: true } })
+        ? tx.callLog.findUnique({ where: { id: opts.callLogId }, include: { order: true } })
         : null) ||
       (opts.vapiCallId
-        ? await tx.callLog.findFirst({ where: { vapiCallId: opts.vapiCallId }, include: { order: true } })
+        ? tx.callLog.findFirst({ where: { vapiCallId: opts.vapiCallId }, include: { order: true } })
         : null) ||
-      (await tx.callLog.findFirst({
+      tx.callLog.findFirst({
         where: { orderId },
         orderBy: { createdAt: "desc" },
         include: { order: true },
-      }));
+      }),
+      tx.appConfig.findFirst({ where: { shop: "default" } }),
+    ]);
+
+    const waAutoConfirm = config?.waAutoConfirm ?? true; // Default to true if not set
 
     if (!callLog) {
       throw new Error(`CallLog not found for orderId=${orderId}`);
@@ -198,6 +226,8 @@ export async function handleCallResult(orderId, intent, opts = {}) {
                 normalizedIntent === CALL_INTENT.CONFIRM
                   ? ORDER_STATUS.CONFIRMED
                   : ORDER_STATUS.CANCELLED,
+              confirmationStatus:
+                normalizedIntent === CALL_INTENT.CONFIRM ? "confirmed" : "cancelled",
             },
           }),
           tx.callLog.update({
@@ -211,6 +241,14 @@ export async function handleCallResult(orderId, intent, opts = {}) {
             },
           }),
         ]);
+
+        await logCommunicationEvent(
+          orderId,
+          `Order ${normalizedIntent.toLowerCase()} via late intent (${
+            opts.fromWhatsApp ? "WhatsApp" : "Call"
+          })`,
+          tx,
+        );
 
         logStatus("TERMINAL_CORRECTED_FROM_LATE_INTENT", {
           orderId,
@@ -252,12 +290,20 @@ export async function handleCallResult(orderId, intent, opts = {}) {
 
     if (normalizedIntent === CALL_INTENT.CONFIRM) {
       const [order, call] = await Promise.all([
-        tx.order.update({ where: { id: orderId }, data: { orderStatus: ORDER_STATUS.CONFIRMED } }),
+        tx.order.update({
+          where: { id: orderId },
+          data: { orderStatus: ORDER_STATUS.CONFIRMED, confirmationStatus: "confirmed" },
+        }),
         tx.callLog.update({
           where: { id: callLog.id },
           data: { ...baseCallUpdate, status: CALL_STATUS.COMPLETED, nextRetryAt: null },
         }),
       ]);
+      await logCommunicationEvent(
+        orderId,
+        `Order confirmed via ${opts.fromWhatsApp ? "WhatsApp" : "Call"}`,
+        tx,
+      );
       logStatus("RESULT_APPLIED", {
         orderId,
         callLogId: call.id,
@@ -275,12 +321,20 @@ export async function handleCallResult(orderId, intent, opts = {}) {
 
     if (normalizedIntent === CALL_INTENT.CANCEL) {
       const [order, call] = await Promise.all([
-        tx.order.update({ where: { id: orderId }, data: { orderStatus: ORDER_STATUS.CANCELLED } }),
+        tx.order.update({
+          where: { id: orderId },
+          data: { orderStatus: ORDER_STATUS.CANCELLED, confirmationStatus: "cancelled" },
+        }),
         tx.callLog.update({
           where: { id: callLog.id },
           data: { ...baseCallUpdate, status: CALL_STATUS.COMPLETED, nextRetryAt: null },
         }),
       ]);
+      await logCommunicationEvent(
+        orderId,
+        `Order cancelled via ${opts.fromWhatsApp ? "WhatsApp" : "Call"}`,
+        tx,
+      );
       logStatus("RESULT_APPLIED", {
         orderId,
         callLogId: call.id,
@@ -328,91 +382,88 @@ export async function handleCallResult(orderId, intent, opts = {}) {
     if (!isRetryIntent) {
       throw new Error(`Unsupported intent=${normalizedIntent}`);
     }
-
+    const userMaxRetries = config?.maxRetries ?? 3;
     const nextRetryCount = callLog.retryCount + 1;
 
-    // ── WhatsApp fallback: after MAX_NO_RESPONSE_RETRIES failed attempts ──
-    // Triggers on ALL retry intents (NO_RESPONSE, RECALL_REQUEST, BUSY)
-    // because Vapi reports unanswered calls as recall_request/busy, not NO_RESPONSE
-    if (nextRetryCount >= MAX_NO_RESPONSE_RETRIES) {
+    // ── WhatsApp fallback or Escalation ──
+    // This block triggers when we reach the user-defined max retries.
+    if (nextRetryCount >= userMaxRetries) {
       const now = new Date();
-      const [order, call] = await Promise.all([
-        tx.order.update({
-          where: { id: orderId },
-          data: { orderStatus: ORDER_STATUS.PENDING },
-        }),
-        tx.callLog.update({
-          where: { id: callLog.id },
-          data: {
-            ...baseCallUpdate,
-            status: CALL_STATUS.WHATSAPP_SENT,
-            retryCount: nextRetryCount,
-            nextRetryAt: null,
-            whatsappSentAt: now,
-            whatsappReplied: false,
-            secondReminderSent: false,
-          },
-        }),
-      ]);
 
-      logStatus("WHATSAPP_FALLBACK_TRIGGERED", {
-        orderId,
-        callLogId: call.id,
-        intent: normalizedIntent,
-        orderStatus: order.orderStatus,
-        callStatus: call.status,
-        retryCount: call.retryCount,
-      });
+      if (waAutoConfirm) {
+        // Option A: Send WhatsApp and wait for reply
+        const [order, call] = await Promise.all([
+          tx.order.update({
+            where: { id: orderId },
+            data: { orderStatus: ORDER_STATUS.PENDING },
+          }),
+          tx.callLog.update({
+            where: { id: callLog.id },
+            data: {
+              ...baseCallUpdate,
+              status: CALL_STATUS.WHATSAPP_SENT,
+              retryCount: nextRetryCount,
+              nextRetryAt: null,
+              whatsappSentAt: now,
+              whatsappReplied: false,
+              secondReminderSent: false,
+            },
+          }),
+        ]);
 
-      // Send WhatsApp message outside the transaction (fire-and-forget with logging)
-      // We need the full callLog with order for the message builder
-      const fullCallLog = { ...call, order };
-      sendWhatsAppFallback(fullCallLog).catch((err) => {
-        console.error(
-          `[WhatsApp] Failed to send fallback for callLogId=${call.id}:`,
-          err.message,
-        );
-      });
+        logStatus("MAX_RETRIES_SWITCH_TO_WHATSAPP", {
+          orderId,
+          callLogId: call.id,
+          nextRetryCount,
+          maxRetries: userMaxRetries,
+        });
 
-      return {
-        orderStatus: order.orderStatus,
-        callStatus: call.status,
-        retryCount: call.retryCount,
-        whatsappSent: true,
-      };
+        // Send WhatsApp message outside the transaction
+        const fullCallLog = { ...call, order };
+        sendWhatsAppFallback(fullCallLog).catch((err) => {
+          console.error(`[WhatsApp] Failed to send fallback for callLogId=${call.id}:`, err.message);
+        });
+
+        return {
+          orderStatus: order.orderStatus,
+          callStatus: call.status,
+          retryCount: call.retryCount,
+          whatsappSent: true,
+        };
+      } else {
+        // Option B: No WhatsApp, just escalate to manual review
+        const [order, call] = await Promise.all([
+          tx.order.update({
+            where: { id: orderId },
+            data: { orderStatus: ORDER_STATUS.PENDING_MANUAL_REVIEW },
+          }),
+          tx.callLog.update({
+            where: { id: callLog.id },
+            data: {
+              ...baseCallUpdate,
+              status: CALL_STATUS.FAILED,
+              retryCount: nextRetryCount,
+              nextRetryAt: null,
+            },
+          }),
+        ]);
+
+        logStatus("MAX_RETRIES_ESCALATED", {
+          orderId,
+          callLogId: call.id,
+          nextRetryCount,
+          maxRetries: userMaxRetries,
+        });
+
+        return {
+          orderStatus: order.orderStatus,
+          callStatus: call.status,
+          retryCount: call.retryCount,
+        };
+      }
     }
 
-    if (nextRetryCount >= MAX_RETRIES) {
-      const [order, call] = await Promise.all([
-        tx.order.update({
-          where: { id: orderId },
-          data: { orderStatus: ORDER_STATUS.PENDING_MANUAL_REVIEW },
-        }),
-        tx.callLog.update({
-          where: { id: callLog.id },
-          data: {
-            ...baseCallUpdate,
-            status: CALL_STATUS.FAILED,
-            retryCount: nextRetryCount,
-            nextRetryAt: null,
-          },
-        }),
-      ]);
-      logStatus("RESULT_APPLIED", {
-        orderId,
-        callLogId: call.id,
-        intent: normalizedIntent,
-        orderStatus: order.orderStatus,
-        callStatus: call.status,
-        retryCount: call.retryCount,
-      });
-      return {
-        orderStatus: order.orderStatus,
-        callStatus: call.status,
-        retryCount: call.retryCount,
-      };
-    }
-
+    // ── If not at max retries yet, schedule next call ──
     const delayMs =
       normalizedIntent === CALL_INTENT.NO_RESPONSE
         ? RETRY_DELAY_NO_RESPONSE_MS
@@ -519,6 +570,52 @@ export async function claimStaleInProgressCallLogs(limit = 25) {
     if (lock.count === 1) {
       claimed.push(row);
       logStatus("STALE_IN_PROGRESS_CLAIMED", { callLogId: row.id, orderId: row.orderId });
+    }
+  }
+
+  return claimed;
+}
+
+export async function claimTimedOutWhatsAppLogs(timeoutSeconds = 300, limit = 25) {
+  const cutoff = new Date(Date.now() - timeoutSeconds * 1000);
+
+  const rows = await prisma.callLog.findMany({
+    where: {
+      status: CALL_STATUS.WHATSAPP_SENT,
+      whatsappSentAt: { lte: cutoff },
+      whatsappReplied: false,
+      lockedAt: null,
+    },
+    orderBy: { whatsappSentAt: "asc" },
+    take: limit,
+    include: { order: true },
+  });
+
+  const claimed = [];
+  for (const row of rows) {
+    const lock = await prisma.callLog.updateMany({
+      where: {
+        id: row.id,
+        status: CALL_STATUS.WHATSAPP_SENT,
+        whatsappSentAt: { lte: cutoff },
+        lockedAt: null,
+      },
+      data: {
+        lockedAt: new Date(),
+      },
+    });
+
+    if (lock.count === 1) {
+      claimed.push(row);
+      await logCommunicationEvent(row.orderId, "Fallback to AI Call due to WhatsApp timeout");
+      
+      // Update order status to indicate fallback
+      await prisma.order.update({
+        where: { id: row.orderId },
+        data: { confirmationStatus: "no_response" }
+      });
+
+      logStatus("WHATSAPP_TIMEOUT_CLAIMED", { callLogId: row.id, orderId: row.orderId });
     }
   }
 

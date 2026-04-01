@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Vapi Order Service
  *
  * Triggers outbound AI calls for order confirmation.
@@ -9,6 +9,8 @@
  * - assistantOverrides only supports runtime values like
  *   firstMessage, variableValues, serverUrl.
  */
+
+import prisma from "../db.server.js";
 
 const VAPI_BASE_URL = "https://api.vapi.ai";
 
@@ -221,28 +223,115 @@ export async function getVapiCallIntent(vapiCallId) {
 }
 
 /* ─────────────────────────────────────────────────────────────
-   First message builder
+   First message builder — reads active Script from DB
    ───────────────────────────────────────────────────────────── */
 
-function buildFirstMessage(customerName, storeName, orderId, totalPrice) {
-  const lang = String(process.env.CALL_LANGUAGE ?? "hindi").toLowerCase().trim();
-
-//   if (lang === "gujarati") {
-//     return (
-//       `नमस्ते ${customerName}, ` +
-//       `हूं ${storeName} तरफथी बोली रह्यो छुं. ` +
-//       `तमे ₹${totalPrice}नो ऑर्डर #${orderId} place कर्यो छे. ` +
-//       `शुं तमे आ ऑर्डर confirm करो छो?`
-//     );
-//   }
-if (lang === "gujarati") {
-  return (
-    `નમસ્તે ${customerName}, ` +
-    `હું ${storeName} તરફથી બોલી રહ્યો છું. ` +
-    `તમે ₹${totalPrice} નો ઓર્ડર #${orderId} કર્યો છે. ` +
-    `શું તમે આ ઓર્ડર કન્ફર્મ કરો છો?`
-  );
+/**
+ * Substitutes {{VARIABLE}} placeholders in a script body.
+ */
+function substituteVariables(template, vars) {
+  return template
+    .replace(/\{\{CUSTOMER_NAME\}\}/g, vars.customerName || "")
+    .replace(/\{\{ORDER_ID\}\}/g, vars.orderId || "")
+    .replace(/\{\{TOTAL\}\}/g, vars.totalPrice || "")
+    .replace(/\{\{PRODUCT_LIST\}\}/g, vars.productList || "your items")
+    .replace(/\{\{ADDRESS\}\}/g, vars.address || "your address")
+    .replace(/\{\{DELIVERY_DATE\}\}/g, vars.deliveryDate || "soon")
+    .replace(/\{\{STORE_NAME\}\}/g, vars.storeName || "our store");
 }
+
+/**
+ * Detects if text contains Hindi (Devanagari) characters.
+ */
+function containsHindi(text) {
+  return /[\u0900-\u097F]/.test(text);
+}
+
+/**
+ * Detects if text contains Gujarati characters.
+ */
+function containsGujarati(text) {
+  return /[\u0A80-\u0AFF]/.test(text);
+}
+
+/**
+ * Checks if a script body matches the selected language.
+ * - Hindi → script must contain Devanagari characters
+ * - Gujarati → script must contain Gujarati characters
+ * - English → script should NOT contain Devanagari/Gujarati (i.e. Latin text)
+ */
+function scriptMatchesLanguage(scriptBody, lang) {
+  if (lang === "hindi") return containsHindi(scriptBody);
+  if (lang === "gujarati") return containsGujarati(scriptBody);
+  // English — accept any script that is primarily Latin
+  return !containsHindi(scriptBody) && !containsGujarati(scriptBody);
+}
+
+/**
+ * Build the first message for the AI call.
+ * 
+ * Priority:
+ * 1. Read callLanguage from AppConfig DB (or env)
+ * 2. If there's an ACTIVE script that MATCHES the selected language → use it
+ * 3. If no matching script → use the language-specific default message
+ */
+async function buildFirstMessageFromScript(customerName, storeName, orderId, totalPrice) {
+  // Step 1: Determine the configured call language
+  let lang = "hindi";
+  try {
+    const appConfig = await prisma.appConfig.findFirst({ where: { shop: "default" } });
+    if (appConfig?.callLanguage) {
+      lang = appConfig.callLanguage.toLowerCase().trim();
+    }
+  } catch (_) {
+    lang = String(process.env.CALL_LANGUAGE ?? "hindi").toLowerCase().trim();
+  }
+
+  console.log(`[Vapi] Call language from config: "${lang}"`);
+
+  // Step 2: Try to use the active script, but ONLY if it matches the language
+  try {
+    const activeScript = await prisma.script.findFirst({
+      where: { shop: "default", isActive: true },
+    });
+
+    if (activeScript && activeScript.body) {
+      if (scriptMatchesLanguage(activeScript.body, lang)) {
+        console.log(`[Vapi] ✅ Using active script: "${activeScript.name}" (matches language: ${lang})`);
+        return substituteVariables(activeScript.body, {
+          customerName,
+          storeName,
+          orderId,
+          totalPrice,
+        });
+      } else {
+        console.log(`[Vapi] ⚠️ Active script "${activeScript.name}" is NOT in ${lang}, skipping → using ${lang} default`);
+      }
+    }
+  } catch (err) {
+    console.error("[Vapi] Failed to read active script from DB:", err.message);
+  }
+
+  // Step 3: Language-specific default messages
+  if (lang === "gujarati") {
+    return (
+      `નમસ્તે ${customerName}, ` +
+      `હું ${storeName} તરફથી બોલી રહ્યો છું. ` +
+      `તમે ₹${totalPrice} નો ઓર્ડર #${orderId} કર્યો છે. ` +
+      `શું તમે આ ઓર્ડર કન્ફર્મ કરો છો?`
+    );
+  }
+
+  if (lang === "english") {
+    return (
+      `Hello ${customerName}, ` +
+      `I am calling from ${storeName}. ` +
+      `You placed Order #${orderId} worth ₹${totalPrice}. ` +
+      `Can you please confirm this order?`
+    );
+  }
+
+  // Default: Hindi
   return (
     `नमस्ते ${customerName}, ` +
     `मैं ${storeName} की तरफ से बोल रहा हूं। ` +
@@ -264,9 +353,21 @@ export async function triggerOrderConfirmationCall({
   totalPrice,
   overrideBaseUrl,
 }) {
-  const apiKey = process.env.VAPI_API_KEY;
-  const phoneNumberId = process.env.VAPI_PHONE_NUMBER_ID;
-  const assistantId = process.env.VAPI_ORDER_ASSISTANT_ID ?? process.env.VAPI_ASSISTANT_ID;
+  // Try reading config from DB first, fallback to env vars
+  let apiKey = process.env.VAPI_API_KEY;
+  let phoneNumberId = process.env.VAPI_PHONE_NUMBER_ID;
+  let assistantId = process.env.VAPI_ORDER_ASSISTANT_ID ?? process.env.VAPI_ASSISTANT_ID;
+
+  try {
+    const dbConfig = await prisma.appConfig.findFirst({ where: { shop: "default" } });
+    if (dbConfig) {
+      if (dbConfig.vapiApiKey) apiKey = dbConfig.vapiApiKey;
+      if (dbConfig.vapiPhoneId) phoneNumberId = dbConfig.vapiPhoneId;
+      if (dbConfig.vapiAssistantId) assistantId = dbConfig.vapiAssistantId;
+    }
+  } catch (_) {
+    // Fallback to env vars (already set above)
+  }
 
   const candidates = [
     overrideBaseUrl,
@@ -291,6 +392,9 @@ export async function triggerOrderConfirmationCall({
     throw new VapiOrderError("Missing public webhook URL.", { retryable: false });
   }
 
+  // Build first message from the active script in DB
+  const firstMessage = await buildFirstMessageFromScript(customerName, storeName, orderId, totalPrice);
+
   const payload = {
     phoneNumberId,
     assistantId,
@@ -299,7 +403,7 @@ export async function triggerOrderConfirmationCall({
     metadata: { callLogId, orderId, type: "order_confirmation" },
     assistantOverrides: {
       serverUrl: orderWebhookUrl,
-      firstMessage: buildFirstMessage(customerName, storeName, orderId, totalPrice),
+      firstMessage,
       variableValues: {
         customerName,
         storeName,
@@ -308,6 +412,8 @@ export async function triggerOrderConfirmationCall({
       },
     },
   };
+
+  console.log(`[Vapi] Triggering call with firstMessage: "${firstMessage.substring(0, 100)}..."`);
 
   const response = await fetch(`${VAPI_BASE_URL}/call/phone`, {
     method: "POST",

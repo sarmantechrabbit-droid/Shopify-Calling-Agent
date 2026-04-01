@@ -3,25 +3,38 @@
  *
  * Sends a WhatsApp message via Twilio after 3 failed call attempts.
  * The customer can reply with 1/2/3 to confirm, cancel, or report wrong number.
+ *
+ * Reads Twilio credentials from AppConfig DB first, falls back to env vars.
  */
 
 import twilio from "twilio";
+import prisma from "../db.server.js";
 
-function getTwilioClient() {
-  const accountSid = process.env.TWILIO_ACCOUNT_SID;
-  const authToken = process.env.TWILIO_AUTH_TOKEN;
+async function getDbConfig() {
+  try {
+    return await prisma.appConfig.findFirst({ where: { shop: "default" } });
+  } catch (_) {
+    return null;
+  }
+}
+
+async function getTwilioClient() {
+  const dbConfig = await getDbConfig();
+  const accountSid = dbConfig?.twilioSid || process.env.TWILIO_ACCOUNT_SID;
+  const authToken = dbConfig?.twilioToken || process.env.TWILIO_AUTH_TOKEN;
 
   if (!accountSid || !authToken) {
-    throw new Error("[WhatsApp] Missing TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN in env");
+    throw new Error("[WhatsApp] Missing TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN in env or DB config");
   }
 
   return twilio(accountSid, authToken);
 }
 
-function getWhatsAppFrom() {
-  const from = process.env.TWILIO_WHATSAPP_FROM;
+async function getWhatsAppFrom() {
+  const dbConfig = await getDbConfig();
+  const from = dbConfig?.twilioWaFrom || process.env.TWILIO_WHATSAPP_FROM;
   if (!from) {
-    throw new Error("[WhatsApp] Missing TWILIO_WHATSAPP_FROM in env (e.g. whatsapp:+14155238886)");
+    throw new Error("[WhatsApp] Missing TWILIO_WHATSAPP_FROM in env or DB config");
   }
   // Ensure the "whatsapp:" prefix is present
   return from.startsWith("whatsapp:") ? from : `whatsapp:${from}`;
@@ -36,14 +49,15 @@ function formatWhatsAppNumber(phoneNumber) {
 /**
  * Build the WhatsApp fallback message body.
  */
-function buildMessageBody(customerName, orderId, totalPrice) {
+function buildMessageBody(customerName, orderId, totalPrice, address) {
   return (
-    `Hi ${customerName},\n` +
-    `You placed Order #${orderId} worth ₹${totalPrice}.\n\n` +
-    `Please reply:\n` +
-    `1 - YES (Confirm)\n` +
-    `2 - NO (Cancel)\n` +
-    `3 - I did not place this order`
+    `Hello ${customerName}, thank you for your order!\n\n` +
+    `Order ID: ${orderId}\n` +
+    `Total: ₹${totalPrice}\n` +
+    (address ? `Address: ${address}\n\n` : "\n") +
+    `Please confirm your order by replying:\n` +
+    `YES to confirm ✅\n` +
+    `NO to cancel ❌`
   );
 }
 
@@ -59,15 +73,18 @@ export async function sendWhatsAppFallback(callLog) {
   }
 
   const { order } = callLog;
-  const client = getTwilioClient();
-  const from = getWhatsAppFrom();
+  const client = await getTwilioClient();
+  const from = await getWhatsAppFrom();
   const to = formatWhatsAppNumber(order.phoneNumber);
 
   const body = buildMessageBody(
     order.customerName,
     order.shopifyOrderId,
     order.totalPrice,
+    order.address,
   );
+
+  console.log(`[WhatsApp] Body for to=${to}: ${body}`);
 
   console.log(`[WhatsApp] Sending fallback to ${to} for orderId=${order.id} callLogId=${callLog.id}`);
 
